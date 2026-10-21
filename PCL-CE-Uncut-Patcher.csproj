@@ -13,6 +13,8 @@
     <Version>1.0.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- 允许在 Linux 上交叉发布 Windows 目标（CI 用） -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
   <ItemGroup>
