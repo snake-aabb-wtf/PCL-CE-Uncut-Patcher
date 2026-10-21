@@ -1,0 +1,125 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: 安装 .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: 发布
+        run: |
+          dotnet publish PCL-CE-Uncut-Patcher.csproj -c Release -r win-x64 \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o dist
+
+      - name: 产物检查
+        run: |
+          set -e
+          test -f dist/PCL-CE-Uncut-Patcher.exe
+          size=$(stat -c%s dist/PCL-CE-Uncut-Patcher.exe)
+          echo "size=$size"
+          test "$size" -gt 20000000
+          head -c 2 dist/PCL-CE-Uncut-Patcher.exe | od -An -tx1 | tr -d ' \n' | grep -q '4d5a'
+          echo "PE header ok"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: PCL-CE-Uncut-Patcher
+          path: dist/PCL-CE-Uncut-Patcher.exe
+          archive: false
+          if-no-files-found: error
+
+  verify:
+    needs: publish
+    runs-on: windows-latest
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: PCL-CE-Uncut-Patcher
+          path: dist
+
+      - name: 下载官方程序
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://github.com/PCL-Community/PCL-CE/releases/download/v2.15.1'
+          Invoke-WebRequest -Uri "$base/PCL2_CE_Release_x64.exe" -OutFile 'official-x64.exe'
+          Invoke-WebRequest -Uri "$base/PCL2_CE_Release_ARM64.exe" -OutFile 'official-arm64.exe'
+          Get-Item *.exe | Format-Table Name, Length
+
+      - name: 端到端自检
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Join-Path (Get-Location) 'dist\PCL-CE-Uncut-Patcher.exe'
+
+          function Invoke-Tool {
+            param([string[]]$Arguments)
+            & $tool @Arguments 2>&1 | Out-Host
+            return $LASTEXITCODE
+          }
+
+          function Assert-Equal {
+            param($Actual, $Expected, [string]$Message)
+            if ($Actual -ne $Expected) { throw "$Message (actual=$Actual expected=$Expected)" }
+          }
+
+          $code = Invoke-Tool @('--version')
+          Assert-Equal $code 0 '--version 失败'
+          Write-Output '版本输出正常'
+
+          foreach ($name in @('official-x64.exe', 'official-arm64.exe')) {
+            $source = Join-Path (Get-Location) $name
+            $target = Join-Path (Get-Location) ($name -replace '\.exe$', '-uncut.exe')
+
+            $code = Invoke-Tool @($source, '--check')
+            Assert-Equal $code 0 "$name 检查失败"
+
+            $code = Invoke-Tool @($source, '-o', $target)
+            Assert-Equal $code 0 "$name 打补丁失败"
+
+            $sourceSize = (Get-Item $source).Length
+            $targetSize = (Get-Item $target).Length
+            Assert-Equal $targetSize $sourceSize "$name 打补丁后长度变了"
+            Write-Output "$name 长度不变：$targetSize"
+
+            $code = Invoke-Tool @($target, '--check')
+            Assert-Equal $code 1 "$name 已打补丁的文件没有被拒绝"
+
+            $diff = @(fc.exe /b $source $target | Select-String -Pattern '^[0-9A-Fa-f]{6,8}:')
+            Write-Output "$name 差异字节数：$($diff.Count)"
+            if ($diff.Count -eq 0) { throw "$name 补丁没有改动任何字节" }
+            if ($diff.Count -gt 16) { throw "$name 改动字节过多：$($diff.Count)" }
+          }
+
+          $code = Invoke-Tool @("$env:WINDIR\System32\notepad.exe", '--check')
+          Assert-Equal $code 1 'notepad.exe 没有被拒绝'
+
+          Write-Output '端到端自检通过'
