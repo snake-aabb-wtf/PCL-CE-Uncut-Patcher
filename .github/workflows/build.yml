@@ -123,3 +123,4 @@ jobs:
           Assert-Equal $code 1 'notepad.exe 没有被拒绝'
 
           Write-Output '端到端自检通过'
+          exit 0
